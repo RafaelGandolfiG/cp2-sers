@@ -1,23 +1,129 @@
 import pandas as pd
 import math
 from datetime import datetime
-
+from pathlib import Path
 
 # ============================================================
 # DATASETS FOTOVOLTAICOS
 # ============================================================
 
+
 def carregar_datasets():
     try:
-        modulos = pd.read_csv("modulos.csv")
-        inversores = pd.read_csv("inversores.csv")
-        baterias = pd.read_csv("baterias.csv")
+        modulos = pd.read_csv(Path(__file__).resolve().parent / "modulos.csv")
+        inversores = pd.read_csv(Path(__file__).resolve().parent / "inversores.csv")
+        baterias = pd.read_csv(Path(__file__).resolve().parent / "baterias.csv")
         print("Datasets carregados com sucesso!")
         return modulos, inversores, baterias
     except FileNotFoundError:
         print("ERRO: algum CSV não foi encontrado.")
-        print("Deixe modulos.csv, inversores.csv e baterias.csv na mesma pasta do main.py.")
+        print(
+            "Deixe modulos.csv, inversores.csv e baterias.csv na mesma pasta do main.py."
+        )
         return None, None, None
+
+
+def preco_cotado(item):
+    """Preço de dataset com origem documentada, ou cotação fornecida na sessão."""
+    preco = pd.to_numeric(item.get("preco_brl"), errors="coerce")
+    if (
+        pd.notna(preco)
+        and float(preco) > 0
+        and str(item.get("fornecedor", "")).upper()
+        not in ("PENDENTE", "VALOR_ESTIMADO")
+    ):
+        return float(preco)
+    print(
+        f"\nATENÇÃO: {item['fabricante']} {item['modelo']} não possui preço rastreável no CSV."
+    )
+    while True:
+        entrada = input(
+            "Valor unitário da cotação documentada (R$, ou ENTER para cancelar): "
+        ).strip()
+        if not entrada:
+            return None
+        try:
+            valor = float(entrada.replace(",", "."))
+            if not math.isfinite(valor) or valor <= 0:
+                raise ValueError
+        except ValueError:
+            print("Valor inválido.")
+            continue
+        fonte = input("URL, fornecedor ou identificação da cotação: ").strip()
+        if not fonte:
+            print("Fonte obrigatória para essa cotação.")
+            continue
+        print("Cotação informada manualmente (não consta do dataset):", fonte)
+        return valor
+
+
+def verificar_modulo(modulo):
+    try:
+        p, voc, vmp, isc, imp = (
+            float(modulo[k])
+            for k in ("potencia_wp", "voc_v", "vmp_v", "isc_a", "imp_a")
+        )
+        return (
+            all(math.isfinite(x) and x > 0 for x in (p, voc, vmp, isc, imp))
+            and voc > vmp
+            and isc >= imp
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def configuracoes_strings(modulo, quantidade_total, inversor):
+    """Só aceita strings de mesmo comprimento; uma por MPPT, sem paralelismo."""
+    if not verificar_modulo(modulo):
+        return []
+    resultado = []
+    mppts = int(inversor["numero_mppt"])
+    for n_strings in range(1, min(mppts, quantidade_total) + 1):
+        if quantidade_total % n_strings:
+            continue
+        n = quantidade_total // n_strings
+        vmp = n * float(modulo["vmp_v"])
+        voc = n * float(modulo["voc_v"])
+        corrente = float(modulo["imp_a"])
+        if (
+            quantidade_total * float(modulo["potencia_wp"])
+            <= float(inversor["potencia_max_fv_w"])
+            and voc <= float(inversor["tensao_max_entrada_v"])
+            and float(inversor["faixa_mppt_min_v"])
+            <= vmp
+            <= float(inversor["faixa_mppt_max_v"])
+            and corrente <= float(inversor["corrente_max_entrada_a"])
+        ):
+            resultado.append(
+                {
+                    "numero_strings": n_strings,
+                    "modulos_por_string": n,
+                    "vmp_string": vmp,
+                    "voc_string": voc,
+                    "corrente_string": corrente,
+                }
+            )
+    return resultado
+
+
+def bateria_compativel(inversor, bateria):
+    """Matriz restrita de pares respaldados por documentação de compatibilidade.
+
+    GoodWe ET Plus 5-10kW pode usar BYD Battery-Box Premium HVS/HVM,
+    sujeito a firmware/BMS mínimo e condições do fabricante. Outras combinações
+    não serão consideradas comprovadas somente pela flag compativel_bateria.
+    """
+    inv = str(inversor["modelo"]).upper()
+    mod = str(bateria["modelo"]).upper()
+    if (
+        str(inversor["fabricante"]).upper() == "GOODWE"
+        and "KN-ET" in inv
+        and str(bateria["fabricante"]).upper() == "BYD"
+        and ("HVS" in mod or "HVM" in mod)
+    ):
+        v = float(bateria["tensao_nominal_v"])
+        return 180 <= v <= 600
+    return False
 
 
 modulos, inversores, baterias = carregar_datasets()
@@ -42,6 +148,7 @@ equipamentos = [
 # ============================================================
 # FUNÇÕES AUXILIARES
 # ============================================================
+
 
 def linha():
     print("-" * 60)
@@ -80,15 +187,18 @@ def calcular_consumo_total(imovel):
 
 
 def registrar_historico(imovel):
-    imovel["historico"].append({
-        "data": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-        "consumo": calcular_consumo_total(imovel)
-    })
+    imovel["historico"].append(
+        {
+            "data": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            "consumo": calcular_consumo_total(imovel),
+        }
+    )
 
 
 # ============================================================
 # US01 - CADASTRAR CLIENTE
 # ============================================================
+
 
 def cadastrar_cliente():
     print("\nCADASTRAR CLIENTE")
@@ -116,11 +226,7 @@ def cadastrar_cliente():
         print("CEP inválido!")
         cep = input("CEP (8 dígitos): ").strip()
 
-    clientes.append({
-        "codigo": codigo,
-        "nome": nome,
-        "cep": cep
-    })
+    clientes.append({"codigo": codigo, "nome": nome, "cep": cep})
 
     print("Cliente cadastrado com sucesso!")
 
@@ -128,6 +234,7 @@ def cadastrar_cliente():
 # ============================================================
 # US02 - CONSULTAR CLIENTE
 # ============================================================
+
 
 def consultar_cliente():
     print("\nCONSULTAR CLIENTE")
@@ -167,6 +274,7 @@ def consultar_cliente():
 # US03 - EDITAR CLIENTE
 # ============================================================
 
+
 def editar_cliente():
     print("\nEDITAR CLIENTE")
     linha()
@@ -200,6 +308,7 @@ def editar_cliente():
 # US04 - EXCLUIR CLIENTE
 # ============================================================
 
+
 def excluir_cliente():
     print("\nEXCLUIR CLIENTE")
     linha()
@@ -228,6 +337,7 @@ def excluir_cliente():
 # ============================================================
 # US05 - CADASTRAR IMÓVEL
 # ============================================================
+
 
 def cadastrar_imovel():
     print("\nCADASTRAR IMÓVEL")
@@ -261,14 +371,16 @@ def cadastrar_imovel():
         print("CEP inválido!")
         cep = input("CEP do imóvel: ").strip()
 
-    imoveis.append({
-        "codigo": codigo,
-        "cliente_codigo": cliente_codigo,
-        "identificacao": identificacao,
-        "cep": cep,
-        "equipamentos": [],
-        "historico": []
-    })
+    imoveis.append(
+        {
+            "codigo": codigo,
+            "cliente_codigo": cliente_codigo,
+            "identificacao": identificacao,
+            "cep": cep,
+            "equipamentos": [],
+            "historico": [],
+        }
+    )
 
     print("Imóvel cadastrado com sucesso!")
 
@@ -276,6 +388,7 @@ def cadastrar_imovel():
 # ============================================================
 # US06 - VISUALIZAR IMÓVEL
 # ============================================================
+
 
 def mostrar_imovel(imovel):
     cliente = buscar_cliente(imovel["cliente_codigo"])
@@ -321,6 +434,7 @@ def visualizar_imovel():
 # US07 - EDITAR IMÓVEL
 # ============================================================
 
+
 def editar_imovel():
     print("\nEDITAR IMÓVEL")
     linha()
@@ -352,6 +466,7 @@ def editar_imovel():
 # US08 - EXCLUIR IMÓVEL
 # ============================================================
 
+
 def excluir_imovel():
     print("\nEXCLUIR IMÓVEL")
     linha()
@@ -376,21 +491,27 @@ def excluir_imovel():
 # US09 - VISUALIZAR EQUIPAMENTOS
 # ============================================================
 
+
 def visualizar_equipamentos():
     print("\nEQUIPAMENTOS DISPONÍVEIS")
     linha()
 
     for equipamento in equipamentos:
         print(
-            "ID:", equipamento["id"],
-            "|", equipamento["nome"],
-            "|", equipamento["potencia"], "W"
+            "ID:",
+            equipamento["id"],
+            "|",
+            equipamento["nome"],
+            "|",
+            equipamento["potencia"],
+            "W",
         )
 
 
 # ============================================================
 # US10 - CADASTRAR EQUIPAMENTO
 # ============================================================
+
 
 def cadastrar_equipamento():
     print("\nCADASTRAR EQUIPAMENTO")
@@ -410,12 +531,9 @@ def cadastrar_equipamento():
         if equipamento["id"] > maior_id:
             maior_id = equipamento["id"]
 
-    equipamentos.append({
-        "id": maior_id + 1,
-        "nome": nome,
-        "categoria": categoria,
-        "potencia": potencia
-    })
+    equipamentos.append(
+        {"id": maior_id + 1, "nome": nome, "categoria": categoria, "potencia": potencia}
+    )
 
     print("Equipamento cadastrado!")
 
@@ -423,6 +541,7 @@ def cadastrar_equipamento():
 # ============================================================
 # US11 - EXCLUIR EQUIPAMENTO
 # ============================================================
+
 
 def excluir_equipamento():
     visualizar_equipamentos()
@@ -453,6 +572,7 @@ def excluir_equipamento():
 # US12 - ADICIONAR EQUIPAMENTO AO IMÓVEL
 # ============================================================
 
+
 def adicionar_equipamento_imovel():
     print("\nADICIONAR EQUIPAMENTO AO IMÓVEL")
     linha()
@@ -482,21 +602,19 @@ def adicionar_equipamento_imovel():
         elif quantidade <= 0 or horas < 0 or horas > 24:
             print("Quantidade ou horas inválidas.")
         else:
-            consumo = calcular_consumo(
-                equipamento["potencia"],
-                quantidade,
-                horas
-            )
+            consumo = calcular_consumo(equipamento["potencia"], quantidade, horas)
 
-            imovel["equipamentos"].append({
-                "equipamento_id": equipamento["id"],
-                "nome": equipamento["nome"],
-                "categoria": equipamento["categoria"],
-                "potencia": equipamento["potencia"],
-                "quantidade": quantidade,
-                "horas": horas,
-                "consumo": consumo
-            })
+            imovel["equipamentos"].append(
+                {
+                    "equipamento_id": equipamento["id"],
+                    "nome": equipamento["nome"],
+                    "categoria": equipamento["categoria"],
+                    "potencia": equipamento["potencia"],
+                    "quantidade": quantidade,
+                    "horas": horas,
+                    "consumo": consumo,
+                }
+            )
 
             print(f"Consumo: {consumo:.2f} kWh/mês")
 
@@ -512,6 +630,7 @@ def adicionar_equipamento_imovel():
 # ============================================================
 # US13 - HISTÓRICO
 # ============================================================
+
 
 def visualizar_historico():
     print("\nHISTÓRICO DE CONSUMO")
@@ -536,6 +655,7 @@ def visualizar_historico():
 # US14 - DATASETS FOTOVOLTAICOS
 # ============================================================
 
+
 def visualizar_modulos():
     print("\nMÓDULOS FOTOVOLTAICOS")
     linha()
@@ -554,7 +674,7 @@ def visualizar_modulos():
         print("Vmp:", modulo["vmp_v"], "V")
         print("Imp:", modulo["imp_a"], "A")
         print("Eficiência:", modulo["eficiencia_pct"], "%")
-        print(f"Preço: R$ {float(modulo['preco_brl']):.2f}")
+        print(f"Preço: R$ {pd.to_numeric(modulo['preco_brl'], errors='coerce'):.2f}")
         print("Fornecedor:", modulo["fornecedor"])
         print("Data da coleta:", modulo["data_coleta"])
         print("Fonte:", modulo["url_fonte"])
@@ -582,12 +702,12 @@ def visualizar_inversores():
             inversor["faixa_mppt_min_v"],
             "-",
             inversor["faixa_mppt_max_v"],
-            "V"
+            "V",
         )
         print("Corrente máxima de entrada:", inversor["corrente_max_entrada_a"], "A")
         print("Número de MPPT:", inversor["numero_mppt"])
         print("Compatível com bateria:", inversor["compativel_bateria"])
-        print(f"Preço: R$ {float(inversor['preco_brl']):.2f}")
+        print(f"Preço: R$ {pd.to_numeric(inversor['preco_brl'], errors='coerce'):.2f}")
         print("Fornecedor:", inversor["fornecedor"])
         print("Data da coleta:", inversor["data_coleta"])
         print("Fonte:", inversor["url_fonte"])
@@ -612,7 +732,7 @@ def visualizar_baterias():
         print("Capacidade energética:", bateria["capacidade_kwh"], "kWh")
         print("DoD:", bateria["dod_pct"], "%")
         print("Ciclos:", bateria["ciclos"])
-        print(f"Preço: R$ {float(bateria['preco_brl']):.2f}")
+        print(f"Preço: R$ {pd.to_numeric(bateria['preco_brl'], errors='coerce'):.2f}")
         print("Fornecedor:", bateria["fornecedor"])
         print("Data da coleta:", bateria["data_coleta"])
         print("Fonte:", bateria["url_fonte"])
@@ -647,6 +767,7 @@ def menu_datasets():
 # US15 + US16 - DADOS E CÁLCULO FOTOVOLTAICO
 # ============================================================
 
+
 def calcular_dimensionamento_fv(consumo_mensal):
     print("\nDADOS DO DIMENSIONAMENTO FOTOVOLTAICO")
     linha()
@@ -654,8 +775,9 @@ def calcular_dimensionamento_fv(consumo_mensal):
     while True:
         try:
             percentual = float(
-                input("Percentual do consumo que deseja atender (0 a 100): ")
-                .replace(",", ".")
+                input("Percentual do consumo que deseja atender (0 a 100): ").replace(
+                    ",", "."
+                )
             )
             if 0 < percentual <= 100:
                 break
@@ -712,13 +834,14 @@ def calcular_dimensionamento_fv(consumo_mensal):
         "origem_hsp": origem_hsp,
         "dias": dias,
         "eficiencia": eficiencia,
-        "potencia_fv": potencia_fv
+        "potencia_fv": potencia_fv,
     }
 
 
 # ============================================================
 # US17 - SELEÇÃO DE MÓDULOS
 # ============================================================
+
 
 def selecionar_modulo(potencia_fv):
     if modulos is None:
@@ -739,6 +862,12 @@ def selecionar_modulo(potencia_fv):
         print("Módulo não encontrado.")
         return None
 
+    if not verificar_modulo(modulo_escolhido):
+        print(
+            "Dados técnicos incoerentes para esse módulo. Corrija a fonte antes de usá-lo."
+        )
+        return None
+
     potencia_modulo = float(modulo_escolhido["potencia_wp"])
 
     # N = ceil((P_FV × 1000) ÷ P_mod)
@@ -747,7 +876,9 @@ def selecionar_modulo(potencia_fv):
     # P_inst = (N × P_mod) ÷ 1000
     potencia_instalada = (quantidade * potencia_modulo) / 1000
 
-    preco_unitario = float(modulo_escolhido["preco_brl"])
+    preco_unitario = preco_cotado(modulo_escolhido)
+    if preco_unitario is None:
+        return None
 
     # C_mod = N × Preço_mod
     custo_modulos = quantidade * preco_unitario
@@ -765,13 +896,14 @@ def selecionar_modulo(potencia_fv):
         "modulo": modulo_escolhido,
         "quantidade": quantidade,
         "potencia_instalada": potencia_instalada,
-        "custo": custo_modulos
+        "custo": custo_modulos,
     }
 
 
 # ============================================================
 # US18 - SELEÇÃO DO INVERSOR
 # ============================================================
+
 
 def selecionar_inversor(resultado_modulos):
     print("\nSELEÇÃO DO INVERSOR")
@@ -785,51 +917,10 @@ def selecionar_inversor(resultado_modulos):
     quantidade_total = resultado_modulos["quantidade"]
     potencia_instalada = resultado_modulos["potencia_instalada"]
 
-    vmp_modulo = float(modulo["vmp_v"])
-    voc_modulo = float(modulo["voc_v"])
-    imp_modulo = float(modulo["imp_a"])
-
     inversores_compativeis = []
-
     for _, inversor in inversores.iterrows():
-        potencia_max = float(inversor["potencia_max_fv_w"])
-        tensao_max = float(inversor["tensao_max_entrada_v"])
-        mppt_min = float(inversor["faixa_mppt_min_v"])
-        mppt_max = float(inversor["faixa_mppt_max_v"])
-        corrente_max = float(inversor["corrente_max_entrada_a"])
-        numero_mppt = max(1, int(inversor["numero_mppt"]))
-
-        # Distribui os módulos entre os MPPTs para evitar tratar todos
-        # obrigatoriamente como uma única string.
-        numero_strings = min(numero_mppt, quantidade_total)
-        modulos_por_string = math.ceil(quantidade_total / numero_strings)
-
-        # P_array = N × P_mod
-        potencia_array_w = potencia_instalada * 1000
-
-        # Vmp_string = N_s × Vmp_mod
-        vmp_string = modulos_por_string * vmp_modulo
-
-        # Voc_string = N_s × Voc_mod
-        voc_string = modulos_por_string * voc_modulo
-
-        # Em série, a corrente da string é aproximadamente a Imp do módulo.
-        corrente_string = imp_modulo
-
-        potencia_ok = potencia_array_w <= potencia_max
-        voc_ok = voc_string <= tensao_max
-        mppt_ok = mppt_min <= vmp_string <= mppt_max
-        corrente_ok = corrente_string <= corrente_max
-
-        if potencia_ok and voc_ok and mppt_ok and corrente_ok:
-            inversores_compativeis.append({
-                "inversor": inversor,
-                "numero_strings": numero_strings,
-                "modulos_por_string": modulos_por_string,
-                "vmp_string": vmp_string,
-                "voc_string": voc_string,
-                "corrente_string": corrente_string
-            })
+        for config in configuracoes_strings(modulo, quantidade_total, inversor):
+            inversores_compativeis.append({"inversor": inversor, **config})
 
     if not inversores_compativeis:
         print("Nenhum inversor compatível foi encontrado.")
@@ -851,7 +942,7 @@ def selecionar_inversor(resultado_modulos):
         print(f"Vmp da string: {item['vmp_string']:.2f} V")
         print(f"Voc da string: {item['voc_string']:.2f} V")
         print(f"Corrente da string: {item['corrente_string']:.2f} A")
-        print(f"Preço: R$ {float(inversor['preco_brl']):.2f}")
+        print(f"Preço: R$ {pd.to_numeric(inversor['preco_brl'], errors='coerce'):.2f}")
         linha()
 
     id_inversor = input("Digite o ID do inversor desejado: ").strip().upper()
@@ -859,6 +950,12 @@ def selecionar_inversor(resultado_modulos):
     for item in inversores_compativeis:
         inversor = item["inversor"]
         if str(inversor["id"]).strip().upper() == id_inversor:
+            preco = preco_cotado(inversor)
+            if preco is None:
+                return None
+            item = dict(item)
+            item["inversor"] = inversor.copy()
+            item["inversor"]["preco_brl"] = preco
             print("\nINVERSOR SELECIONADO")
             linha()
             print("Fabricante:", inversor["fabricante"])
@@ -873,6 +970,7 @@ def selecionar_inversor(resultado_modulos):
 # ============================================================
 # US19 - ARMAZENAMENTO POR BATERIAS
 # ============================================================
+
 
 def valor_booleano(valor):
     if isinstance(valor, bool):
@@ -898,7 +996,7 @@ def dimensionar_bateria(consumo_mensal, resultado_inversor):
             "quantidade": 0,
             "capacidade_instalada": 0,
             "eficiencia_bateria": 0,
-            "custo": 0
+            "custo": 0,
         }
 
     inversor = resultado_inversor["inversor"]
@@ -932,6 +1030,9 @@ def dimensionar_bateria(consumo_mensal, resultado_inversor):
     print(f"Energia necessária para autonomia: {energia_autonomia:.2f} kWh")
     print("Eficiência de bateria adotada como premissa: 95%")
 
+    if baterias is None:
+        print("Dataset de baterias não carregado.")
+        return None
     visualizar_baterias()
 
     id_bateria = input("Digite o ID da bateria desejada: ").strip().upper()
@@ -946,6 +1047,16 @@ def dimensionar_bateria(consumo_mensal, resultado_inversor):
         print("Bateria não encontrada.")
         return None
 
+    if not bateria_compativel(inversor, bateria_escolhida):
+        print(
+            "Combinação inversor/bateria não comprovada pela matriz de compatibilidade."
+        )
+        print("Consulte a lista oficial do fabricante e requisitos de firmware/BMS.")
+        return None
+
+    preco_bateria = preco_cotado(bateria_escolhida)
+    if preco_bateria is None:
+        return None
     dod = float(bateria_escolhida["dod_pct"]) / 100
     capacidade_unitaria = float(bateria_escolhida["capacidade_kwh"])
 
@@ -963,7 +1074,7 @@ def dimensionar_bateria(consumo_mensal, resultado_inversor):
     capacidade_instalada = quantidade * capacidade_unitaria
 
     # C_baterias = N_bat × Preço_bat
-    custo = quantidade * float(bateria_escolhida["preco_brl"])
+    custo = quantidade * preco_bateria
 
     print("\nDIMENSIONAMENTO DA BATERIA")
     linha()
@@ -991,13 +1102,14 @@ def dimensionar_bateria(consumo_mensal, resultado_inversor):
         "quantidade": quantidade,
         "capacidade_instalada": capacidade_instalada,
         "eficiencia_bateria": eficiencia_bateria,
-        "custo": custo
+        "custo": custo,
     }
 
 
 # ============================================================
 # US20 - ORÇAMENTO E PROPOSTA PRELIMINAR
 # ============================================================
+
 
 def calcular_orcamento(resultado_modulos, resultado_inversor, resultado_bateria):
     print("\nORÇAMENTO PRELIMINAR")
@@ -1010,8 +1122,9 @@ def calcular_orcamento(resultado_modulos, resultado_inversor, resultado_bateria)
     while True:
         try:
             outros_custos = float(
-                input("Outros custos (instalação, cabos etc.) ou 0: R$ ")
-                .replace(",", ".")
+                input("Outros custos (instalação, cabos etc.) ou 0: R$ ").replace(
+                    ",", "."
+                )
             )
             if outros_custos >= 0:
                 break
@@ -1041,22 +1154,20 @@ def calcular_orcamento(resultado_modulos, resultado_inversor, resultado_bateria)
         "custo_baterias": custo_baterias,
         "outros_custos": outros_custos,
         "custo_equipamentos": custo_equipamentos,
-        "custo_total": custo_total
+        "custo_total": custo_total,
     }
 
 
-def gerar_proposta(dados, resultado_modulos, resultado_inversor,
-                   resultado_bateria, resultado_orcamento):
+def gerar_proposta(
+    dados, resultado_modulos, resultado_inversor, resultado_bateria, resultado_orcamento
+):
     modulo = resultado_modulos["modulo"]
     inversor = resultado_inversor["inversor"]
     potencia_instalada = resultado_modulos["potencia_instalada"]
 
     # E_ger = P_inst × HSP × D × η
     geracao_estimada = (
-        potencia_instalada
-        * dados["hsp"]
-        * dados["dias"]
-        * dados["eficiencia"]
+        potencia_instalada * dados["hsp"] * dados["dias"] * dados["eficiencia"]
     )
 
     print("\n" + "=" * 60)
@@ -1111,9 +1222,13 @@ def gerar_proposta(dados, resultado_modulos, resultado_inversor,
         print("Fabricante:", bateria["fabricante"])
         print("Modelo:", bateria["modelo"])
         print(f"Autonomia: {resultado_bateria['autonomia']:.2f} horas")
-        print(f"Capacidade necessária: {resultado_bateria['capacidade_necessaria']:.2f} kWh")
+        print(
+            f"Capacidade necessária: {resultado_bateria['capacidade_necessaria']:.2f} kWh"
+        )
         print("Quantidade:", resultado_bateria["quantidade"])
-        print(f"Capacidade instalada: {resultado_bateria['capacidade_instalada']:.2f} kWh")
+        print(
+            f"Capacidade instalada: {resultado_bateria['capacidade_instalada']:.2f} kWh"
+        )
         print(f"Custo: R$ {resultado_bateria['custo']:.2f}")
     else:
         print("Sistema com bateria: NÃO")
@@ -1162,17 +1277,12 @@ def dimensionar_sistema_fotovoltaico():
     if resultado_inversor is None:
         return
 
-    resultado_bateria = dimensionar_bateria(
-        consumo_mensal,
-        resultado_inversor
-    )
+    resultado_bateria = dimensionar_bateria(consumo_mensal, resultado_inversor)
     if resultado_bateria is None:
         return
 
     resultado_orcamento = calcular_orcamento(
-        resultado_modulos,
-        resultado_inversor,
-        resultado_bateria
+        resultado_modulos, resultado_inversor, resultado_bateria
     )
 
     gerar_proposta(
@@ -1180,26 +1290,29 @@ def dimensionar_sistema_fotovoltaico():
         resultado_modulos,
         resultado_inversor,
         resultado_bateria,
-        resultado_orcamento
+        resultado_orcamento,
     )
-
 
 
 # ============================================================
 # US21 - COMPARAR MÓDULOS FOTOVOLTAICOS
 # ============================================================
 
+
 def calcular_opcao_modulo(modulo, potencia_fv):
+    if not verificar_modulo(modulo):
+        return None
     potencia_modulo = float(modulo["potencia_wp"])
     quantidade = math.ceil((potencia_fv * 1000) / potencia_modulo)
     potencia_instalada = (quantidade * potencia_modulo) / 1000
-    custo = quantidade * float(modulo["preco_brl"])
+    preco = pd.to_numeric(modulo["preco_brl"], errors="coerce")
+    custo = quantidade * float(preco) if pd.notna(preco) else None
 
     return {
         "modulo": modulo,
         "quantidade": quantidade,
         "potencia_instalada": potencia_instalada,
-        "custo": custo
+        "custo": custo,
     }
 
 
@@ -1209,9 +1322,7 @@ def comparar_modulos():
         return
 
     try:
-        potencia_fv = float(
-            input("Potência FV necessária em kWp: ").replace(",", ".")
-        )
+        potencia_fv = float(input("Potência FV necessária em kWp: ").replace(",", "."))
     except ValueError:
         print("Potência inválida.")
         return
@@ -1221,9 +1332,11 @@ def comparar_modulos():
         return
 
     visualizar_modulos()
-    ids = input(
-        "Digite dois ou mais IDs de módulos separados por vírgula: "
-    ).upper().split(",")
+    ids = (
+        input("Digite dois ou mais IDs de módulos separados por vírgula: ")
+        .upper()
+        .split(",")
+    )
 
     ids = [item.strip() for item in ids if item.strip()]
 
@@ -1245,7 +1358,13 @@ def comparar_modulos():
             print(f"Módulo {id_modulo} não encontrado.")
             continue
 
-        resultados.append(calcular_opcao_modulo(encontrado, potencia_fv))
+        calculo = calcular_opcao_modulo(encontrado, potencia_fv)
+        if calculo is None or calculo["custo"] is None:
+            print(
+                f"Módulo {id_modulo}: dados técnicos/preço pendentes. Não incluído na comparação."
+            )
+            continue
+        resultados.append(calculo)
 
     if len(resultados) < 2:
         print("Não há pelo menos duas opções válidas para comparar.")
@@ -1271,6 +1390,7 @@ def comparar_modulos():
 # US22 - COMPARAR INVERSORES COMPATÍVEIS
 # ============================================================
 
+
 def obter_inversores_compativeis(resultado_modulos):
     if inversores is None:
         return []
@@ -1279,42 +1399,10 @@ def obter_inversores_compativeis(resultado_modulos):
     quantidade_total = resultado_modulos["quantidade"]
     potencia_instalada = resultado_modulos["potencia_instalada"]
 
-    vmp_modulo = float(modulo["vmp_v"])
-    voc_modulo = float(modulo["voc_v"])
-    imp_modulo = float(modulo["imp_a"])
-
     compativeis = []
-
     for _, inversor in inversores.iterrows():
-        potencia_max = float(inversor["potencia_max_fv_w"])
-        tensao_max = float(inversor["tensao_max_entrada_v"])
-        mppt_min = float(inversor["faixa_mppt_min_v"])
-        mppt_max = float(inversor["faixa_mppt_max_v"])
-        corrente_max = float(inversor["corrente_max_entrada_a"])
-        numero_mppt = max(1, int(inversor["numero_mppt"]))
-
-        numero_strings = min(numero_mppt, quantidade_total)
-        modulos_por_string = math.ceil(quantidade_total / numero_strings)
-
-        potencia_array_w = potencia_instalada * 1000
-        vmp_string = modulos_por_string * vmp_modulo
-        voc_string = modulos_por_string * voc_modulo
-        corrente_string = imp_modulo
-
-        if (
-            potencia_array_w <= potencia_max
-            and voc_string <= tensao_max
-            and mppt_min <= vmp_string <= mppt_max
-            and corrente_string <= corrente_max
-        ):
-            compativeis.append({
-                "inversor": inversor,
-                "numero_strings": numero_strings,
-                "modulos_por_string": modulos_por_string,
-                "vmp_string": vmp_string,
-                "voc_string": voc_string,
-                "corrente_string": corrente_string
-            })
+        for config in configuracoes_strings(modulo, quantidade_total, inversor):
+            compativeis.append({"inversor": inversor, **config})
 
     return compativeis
 
@@ -1325,9 +1413,7 @@ def comparar_inversores():
         return
 
     try:
-        potencia_fv = float(
-            input("Potência FV necessária em kWp: ").replace(",", ".")
-        )
+        potencia_fv = float(input("Potência FV necessária em kWp: ").replace(",", "."))
     except ValueError:
         print("Potência inválida.")
         return
@@ -1349,10 +1435,10 @@ def comparar_inversores():
         print("Módulo não encontrado.")
         return
 
-    resultado_modulos = calcular_opcao_modulo(
-        modulo_escolhido,
-        potencia_fv
-    )
+    resultado_modulos = calcular_opcao_modulo(modulo_escolhido, potencia_fv)
+    if resultado_modulos is None:
+        print("Dados técnicos inválidos no módulo.")
+        return
 
     compativeis = obter_inversores_compativeis(resultado_modulos)
 
@@ -1376,13 +1462,13 @@ def comparar_inversores():
             inversor["faixa_mppt_min_v"],
             "-",
             inversor["faixa_mppt_max_v"],
-            "V"
+            "V",
         )
         print("Tensão máxima:", inversor["tensao_max_entrada_v"], "V")
         print("Corrente máxima:", inversor["corrente_max_entrada_a"], "A")
         print("MPPTs:", inversor["numero_mppt"])
         print("Compatível com bateria:", inversor["compativel_bateria"])
-        print(f"Preço: R$ {float(inversor['preco_brl']):.2f}")
+        print(f"Preço: R$ {pd.to_numeric(inversor['preco_brl'], errors='coerce'):.2f}")
         print("Strings consideradas:", item["numero_strings"])
         print("Módulos/string:", item["modulos_por_string"])
         print(f"Vmp string: {item['vmp_string']:.2f} V")
@@ -1394,6 +1480,7 @@ def comparar_inversores():
 # ============================================================
 # US23 - RECOMENDAR CONFIGURAÇÃO FOTOVOLTAICA
 # ============================================================
+
 
 def recomendar_configuracao():
     if modulos is None or inversores is None:
@@ -1417,22 +1504,37 @@ def recomendar_configuracao():
     configuracoes = []
 
     for _, modulo in modulos.iterrows():
-        resultado_modulos = calcular_opcao_modulo(
-            modulo,
-            dados["potencia_fv"]
-        )
+        if (
+            not verificar_modulo(modulo)
+            or pd.isna(pd.to_numeric(modulo.get("preco_brl"), errors="coerce"))
+            or str(modulo.get("fornecedor", "")).upper()
+            in ("PENDENTE", "VALOR_ESTIMADO")
+        ):
+            continue
+        resultado_modulos = calcular_opcao_modulo(modulo, dados["potencia_fv"])
 
         compativeis = obter_inversores_compativeis(resultado_modulos)
 
         for item_inversor in compativeis:
+            if pd.isna(
+                pd.to_numeric(
+                    item_inversor["inversor"].get("preco_brl"), errors="coerce"
+                )
+            ) or str(item_inversor["inversor"].get("fornecedor", "")).upper() in (
+                "PENDENTE",
+                "VALOR_ESTIMADO",
+            ):
+                continue
             custo_inversor = float(item_inversor["inversor"]["preco_brl"])
             custo_total = resultado_modulos["custo"] + custo_inversor
 
-            configuracoes.append({
-                "resultado_modulos": resultado_modulos,
-                "resultado_inversor": item_inversor,
-                "custo_total": custo_total
-            })
+            configuracoes.append(
+                {
+                    "resultado_modulos": resultado_modulos,
+                    "resultado_inversor": item_inversor,
+                    "custo_total": custo_total,
+                }
+            )
 
     if not configuracoes:
         print("Nenhuma configuração tecnicamente válida foi encontrada.")
@@ -1457,31 +1559,29 @@ def recomendar_configuracao():
         f"{melhor['resultado_modulos']['potencia_instalada']:.2f} kWp"
     )
     print("Inversor:", inversor["fabricante"], inversor["modelo"])
-    print(
-        f"Custo módulos + inversor: "
-        f"R$ {melhor['custo_total']:.2f}"
-    )
+    print(f"Custo módulos + inversor: " f"R$ {melhor['custo_total']:.2f}")
 
-    resposta = input(
-        "Deseja continuar com essa recomendação e dimensionar bateria/orçamento? (S/N): "
-    ).strip().upper()
+    resposta = (
+        input(
+            "Deseja continuar com essa recomendação e dimensionar bateria/orçamento? (S/N): "
+        )
+        .strip()
+        .upper()
+    )
 
     if resposta != "S":
         print("Recomendação exibida. Nenhuma configuração foi confirmada.")
         return
 
     resultado_bateria = dimensionar_bateria(
-        consumo_mensal,
-        melhor["resultado_inversor"]
+        consumo_mensal, melhor["resultado_inversor"]
     )
 
     if resultado_bateria is None:
         return
 
     resultado_orcamento = calcular_orcamento(
-        melhor["resultado_modulos"],
-        melhor["resultado_inversor"],
-        resultado_bateria
+        melhor["resultado_modulos"], melhor["resultado_inversor"], resultado_bateria
     )
 
     gerar_proposta(
@@ -1489,13 +1589,14 @@ def recomendar_configuracao():
         melhor["resultado_modulos"],
         melhor["resultado_inversor"],
         resultado_bateria,
-        resultado_orcamento
+        resultado_orcamento,
     )
 
 
 # ============================================================
 # US24 - SIMULAR PERCENTUAIS DE ATENDIMENTO
 # ============================================================
+
 
 def simular_percentuais():
     codigo = input("Código do imóvel: ").strip()
@@ -1566,12 +1667,7 @@ def simular_percentuais():
         potencia_fv = energia_fv / (hsp * dias * eficiencia)
         resultado = calcular_opcao_modulo(modulo_escolhido, potencia_fv)
 
-        geracao = (
-            resultado["potencia_instalada"]
-            * hsp
-            * dias
-            * eficiencia
-        )
+        geracao = resultado["potencia_instalada"] * hsp * dias * eficiencia
 
         print(f"Atendimento: {percentual:.2f}%")
         print(f"E_FV: {energia_fv:.2f} kWh/mês")
@@ -1586,6 +1682,7 @@ def simular_percentuais():
 # ============================================================
 # US25 - SIMULAR DIFERENTES VALORES DE HSP
 # ============================================================
+
 
 def simular_hsp():
     codigo = input("Código do imóvel: ").strip()
@@ -1602,9 +1699,7 @@ def simular_hsp():
         return
 
     try:
-        percentual = float(
-            input("Percentual do consumo a atender: ").replace(",", ".")
-        )
+        percentual = float(input("Percentual do consumo a atender: ").replace(",", "."))
     except ValueError:
         print("Percentual inválido.")
         return
@@ -1626,9 +1721,7 @@ def simular_hsp():
         print("Módulo não encontrado.")
         return
 
-    entrada = input(
-        "Valores de HSP separados por vírgula (ex.: 4,4.5,5): "
-    )
+    entrada = input("Valores de HSP separados por vírgula (ex.: 4,4.5,5): ")
 
     try:
         valores_hsp = [
@@ -1644,9 +1737,7 @@ def simular_hsp():
         print("Informe pelo menos dois valores de HSP maiores que zero.")
         return
 
-    origem = input(
-        "Origem/fonte dos valores de HSP ou 'simulação': "
-    ).strip()
+    origem = input("Origem/fonte dos valores de HSP ou 'simulação': ").strip()
 
     energia_fv = consumo_mensal * (percentual / 100)
     eficiencia = 0.80
@@ -1660,12 +1751,7 @@ def simular_hsp():
         potencia_fv = energia_fv / (hsp * dias * eficiencia)
         resultado = calcular_opcao_modulo(modulo_escolhido, potencia_fv)
 
-        geracao = (
-            resultado["potencia_instalada"]
-            * hsp
-            * dias
-            * eficiencia
-        )
+        geracao = resultado["potencia_instalada"] * hsp * dias * eficiencia
 
         print(f"HSP: {hsp:.2f} h/dia")
         print(f"P_FV necessária: {potencia_fv:.2f} kWp")
@@ -1678,6 +1764,7 @@ def simular_hsp():
 # ============================================================
 # US26 - ESTIMAR ECONOMIA DE ENERGIA
 # ============================================================
+
 
 def estimar_economia():
     codigo = input("Código do imóvel: ").strip()
@@ -1695,12 +1782,9 @@ def estimar_economia():
 
     try:
         geracao_mensal = float(
-            input("Geração mensal estimada do sistema (kWh/mês): ")
-            .replace(",", ".")
+            input("Geração mensal estimada do sistema (kWh/mês): ").replace(",", ".")
         )
-        tarifa = float(
-            input("Tarifa de energia (R$/kWh): ").replace(",", ".")
-        )
+        tarifa = float(input("Tarifa de energia (R$/kWh): ").replace(",", "."))
     except ValueError:
         print("Valor inválido.")
         return
@@ -1731,6 +1815,7 @@ def estimar_economia():
 # ============================================================
 # MENU PRINCIPAL - US01 A US26
 # ============================================================
+
 
 def menu():
     while True:
