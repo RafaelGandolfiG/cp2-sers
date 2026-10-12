@@ -9,7 +9,7 @@ from datetime import datetime
 
 def carregar_datasets():
     try:
-        paineis = pd.read_csv("modulos.csv")
+        modulos = pd.read_csv("modulos.csv")
         inversores = pd.read_csv("inversores.csv")
         baterias = pd.read_csv("baterias.csv")
         print("Datasets carregados com sucesso!")
